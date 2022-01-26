@@ -1,0 +1,124 @@
+import os
+import configparser
+import logging
+import logging.handlers as handlers
+import json
+import paho.mqtt.client as mqtt
+from datetime import datetime,timedelta
+import pymongo
+from mongo import Mongodbs
+
+
+
+
+logger = logging.getLogger('echoes_generator')
+logger.setLevel(logging.INFO)
+
+LOCAL_PATH = os.path.dirname(os.path.realpath(__file__))
+
+logHandler = handlers.RotatingFileHandler(os.path.join(LOCAL_PATH, 'contadoresdeestrellas_generator2.log'), maxBytes=1000000, backupCount=2)
+logHandler.setLevel(logging.INFO)
+logger.addHandler(logHandler)
+
+config_ini = configparser.ConfigParser()
+config_ini.read(os.path.join(LOCAL_PATH, 'config.py'))
+
+MQTT_TOPIC_STATIONS = "station/echoes/#"
+MQTT_TOPIC_SERVER_UP = "server/status/up"
+
+
+
+
+config_ini = configparser.ConfigParser()
+config_ini.read(os.path.join(LOCAL_PATH, 'config.py'))
+MQTT_HOST = str(config_ini['MQTT']['HOST'])
+MQTT_PORT = int(config_ini['MQTT']['PORT'])
+
+
+
+
+
+CONFIG_FILE = os.path.join(LOCAL_PATH, '.meteor_radio2.ini') 
+
+config = configparser.ConfigParser()
+
+config['STATIONS'] = {}
+
+config.read(CONFIG_FILE)
+
+
+
+
+def updateConfigFile():
+    logger.info("updateConfigFile")
+    with open(CONFIG_FILE, 'w') as configfile:
+        config.write(configfile)
+        
+def on_station_message(client, userdata, msg):
+
+    topic = msg.topic.split('/')
+    if topic[2] == 'event':
+        registerStation(topic[3])
+        registerStationEvent(topic[3], json.loads(str(msg.payload,"utf-8")))
+
+    elif topic[2] == 'register':
+        registerStation(str(msg.payload))
+
+    else:
+        logger.warning(msg.topic + " " + str(msg.payload))
+        
+def listenStations():
+    mqtt_client = mqtt.Client()
+    # mqtt_client.on_connect = on_connect
+    mqtt_client.on_message = on_station_message
+    mqtt_client.connect(MQTT_HOST, MQTT_PORT, 60)
+    mqtt_client.subscribe(MQTT_TOPIC_STATIONS)
+    mqtt_client.loop_forever()
+    
+
+
+def registerStation(stationName):
+    if stationName not in config['STATIONS']:
+        logger.info("Register Station %s" % (stationName))
+        config['STATIONS'][stationName] = json.dumps({'register': datetime.utcnow().isoformat()})
+        updateConfigFile()
+
+
+def registerStationEvent(stationName, data):
+
+    station_info = json.loads(config['STATIONS'][stationName])
+    if 'last_event' not in station_info or station_info['last_event'] < data['t'][0]:
+    
+        logger.info("Event from Station %s" % (stationName))
+        mycol = Mongodbs.conectMongo()               
+        mydoc = Mongodbs.insertar(stationName,data,mycol)
+        Mongodbs.comprobacion(mydoc)
+        
+        station_info['last_event'] = data['t'][0]            
+        station_info['last_event_date'] = datetime.fromtimestamp(data['t'][0]).utcnow().isoformat()
+        if 'total_events' in station_info:
+            station_info['total_events'] = station_info['total_events'] + 1
+        else:
+            station_info['total_events'] = 1
+
+        config['STATIONS'][stationName] = json.dumps(station_info)
+        updateConfigFile()
+      
+    else:
+        logger.warning("Event from Station %s not valid" % (stationName))
+              
+        
+        
+        
+        
+        
+        
+        
+if __name__ == '__main__':
+
+    try:
+        updateConfigFile()
+        listenStations()
+    except Exception as e:
+        logger.error(e)
+        raise        
